@@ -1,50 +1,41 @@
 
-# Three-Tier App on EKS with a DevSecOps Pipeline
+# Three-Tier Application on AWS EKS with DevSecOps Pipeline
 
 [![CI](https://github.com/jaiswaladi246/three-tier-app-eks-gitops/actions/workflows/ci.yml/badge.svg)](https://github.com/jaiswaladi246/three-tier-app-eks-gitops/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 ![Node](https://img.shields.io/badge/node-20-green)
 
-A React + Express + MySQL application deployed to AWS EKS through a
-GitHub Actions pipeline, with environment promotion from QA to production.
+This project demonstrates a React, Express, and MySQL stack deployed to AWS EKS using a GitHub Actions CI/CD pipeline with automated promotion across QA and production environments.
 
 ## Architecture
 
 ![Architecture](docs/images/architecture.png)
 
-Traffic reaches an ALB provisioned by the AWS Load Balancer Controller,
-which routes to a ClusterIP service fronting the application pods. The
-same image is promoted from QA to production rather than rebuilt, so
-what ships is exactly what was tested.
+Incoming traffic flows through an Application Load Balancer (ALB) managed by the AWS Load Balancer Controller, which directs requests to ClusterIP services backing the application pods. Container images are promoted from QA to production without rebuilding, ensuring that the exact artifact tested in QA is what gets deployed to production.
 
-## Tech stack
+## Technology Stack
 
 Node.js 20, React, MySQL, Docker, Kubernetes (EKS), GitHub Actions, Terraform.
 
-## Repository structure
+## Project Structure
 
-- `src/` application code, split into client and server
-- `k8s/` Kubernetes manifests, split by environment
-- `terraform/` cluster and networking infrastructure
-- `docs/` architecture notes and diagrams
+- `src/` - Application source code (client and server)
+- `k8s/` - Kubernetes manifests organized by environment
+- `terraform/` - Infrastructure code for EKS cluster and networking
+- `docs/` - Documentation and architecture diagrams
 
-## Running locally
+## Local Development
 
     cp .env.example .env
     docker compose up --build
 
-The app is available at http://localhost:5000
+Access the application at http://localhost:5000
 
 ![Architecture](docs/images/localenv.png)
 
 ![Architecture](docs/images/ui.png)
 
-## What I learned
+## Key Takeaways
 
-Building the promotion flow taught me why rebuilding an image per
-environment is a trap: the artifact that passed testing must be the
-artifact that ships. Moving to a retag-and-promote model removed a
-whole class of "works in QA" failures.
-test
-test
-test
+Implementing the environment promotion workflow highlighted the importance of image consistency: rebuilding container images for each environment introduces risk. By adopting a retag-and-promote strategy, the deployment process eliminates "works in QA but fails in production" issues.
+

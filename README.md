@@ -34,6 +34,7 @@ Node.js 20, React, MySQL, Docker, Kubernetes (EKS), GitHub Actions, Terraform.
     docker compose up --build
 
 The app is available at http://localhost:5000
+
 ![Architecture](docs/images/localenv.png)
 ## What I learned
 

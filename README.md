@@ -36,6 +36,9 @@ Node.js 20, React, MySQL, Docker, Kubernetes (EKS), GitHub Actions, Terraform.
 The app is available at http://localhost:5000
 
 ![Architecture](docs/images/localenv.png)
+
+![Architecture](docs/images/ui.png)
+
 ## What I learned
 
 Building the promotion flow taught me why rebuilding an image per

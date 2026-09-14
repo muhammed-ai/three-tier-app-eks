@@ -1,0 +1,352 @@
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Deployment environment'
+        required: true
+        default: 'qa'
+        type: choice
+        options:
+          - qa
+          - prod
+
+env:
+  AWS_REGION: us-east-1
+  ECR_REPOSITORY: three-tier-app
+  EKS_CLUSTER_NAME: three-tier-cluster
+
+jobs:
+  # Job 1: Build and Test
+  build:
+    runs-on: ubuntu-latest
+    outputs:
+      image_tag: ${{ steps.meta.outputs.tags }}
+      image_digest: ${{ steps.build.outputs.digest }}
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: |
+            src/client/package-lock.json
+            src/server/package-lock.json
+
+      - name: Install client dependencies
+        working-directory: src/client
+        run: npm ci
+
+      - name: Install server dependencies
+        working-directory: src/server
+        run: npm ci
+
+      - name: Run server tests
+        working-directory: src/server
+        run: npm test -- --coverage --passWithNoTests
+
+      - name: Build client
+        working-directory: src/client
+        run: npm run build
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Extract metadata for Docker
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=sha,prefix=
+            type=raw,value=${{ github.sha }}-qa
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and push server image
+        id: build-server
+        uses: docker/build-push-action@v5
+        with:
+          context: ./src/server
+          file: ./src/server/Dockerfile
+          push: true
+          tags: |
+            ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}-server:${{ github.sha }}
+            ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}-server:${{ github.sha }}-qa
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Build and push client image
+        id: build-client
+        uses: docker/build-push-action@v5
+        with:
+          context: ./src/client
+          file: ./src/client/Dockerfile
+          push: true
+          tags: |
+            ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}-client:${{ github.sha }}
+            ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}-client:${{ github.sha }}-qa
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # Job 2: Security Scanning
+  security:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Run Trivy vulnerability scanner (server)
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}-server:${{ github.sha }}
+          format: 'sarif'
+          output: 'trivy-server-results.sarif'
+          severity: 'CRITICAL,HIGH'
+
+      - name: Upload Trivy scan results (server)
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: 'trivy-server-results.sarif'
+          category: 'server'
+
+      - name: Run Trivy vulnerability scanner (client)
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}-client:${{ github.sha }}
+          format: 'sarif'
+          output: 'trivy-client-results.sarif'
+          severity: 'CRITICAL,HIGH'
+
+      - name: Upload Trivy scan results (client)
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: 'trivy-client-results.sarif'
+          category: 'client'
+
+      - name: Run npm audit (server)
+        working-directory: src/server
+        run: npm audit --audit-level=high
+        continue-on-error: true
+
+      - name: Run npm audit (client)
+        working-directory: src/client
+        run: npm audit --audit-level=high
+        continue-on-error: true
+
+  # Job 3: Generate SBOM
+  sbom:
+    needs: build
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Syft
+        run: curl -sSfL https://raw.githubusercontent.com/anchore/syft/main/install.sh | sh -s -- -b /usr/local/bin
+
+      - name: Generate SBOM (server)
+        working-directory: src/server
+        run: |
+          syft . -o json > sbom-server.json
+          syft . -o spdx > sbom-server.spdx
+
+      - name: Generate SBOM (client)
+        working-directory: src/client
+        run: |
+          syft . -o json > sbom-client.json
+          syft . -o spdx > sbom-client.spdx
+
+      - name: Upload SBOM artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom
+          path: |
+            src/server/sbom-server.*
+            src/client/sbom-client.*
+
+  # Job 4: Deploy to QA
+  deploy-qa:
+    needs: [build, security]
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main' || github.event.inputs.environment == 'qa'
+    environment:
+      name: qa
+      url: https://qa.app.example.com
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Update kubeconfig
+        run: |
+          aws eks update-kubeconfig --name ${{ env.EKS_CLUSTER_NAME }} --region ${{ env.AWS_REGION }}
+
+      - name: Deploy to QA
+        run: |
+          # Set environment variables for kustomize
+          export ECR_REPOSITORY_URI="${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}"
+          export IMAGE_TAG="${{ github.sha }}-qa"
+          
+          # Apply kustomize overlay
+          kubectl apply -k k8s/qa --namespace=three-tier-app-qa
+          
+          # Wait for rollout
+          kubectl rollout status deployment/server -n three-tier-app-qa --timeout=300s
+          kubectl rollout status deployment/client -n three-tier-app-qa --timeout=300s
+
+      - name: Run smoke tests
+        run: |
+          # Wait for service to be ready
+          sleep 30
+          
+          # Get the ALB URL
+          ALB_URL=$(kubectl get ingress -n three-tier-app-qa -o jsonpath='{.items[0].status.loadBalancer.ingress[0].hostname}')
+          
+          # Health check
+          curl -f "https://${ALB_URL}/health" || exit 1
+
+  # Job 5: Integration Tests
+  integration-tests:
+    needs: deploy-qa
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Update kubeconfig
+        run: |
+          aws eks update-kubeconfig --name ${{ env.EKS_CLUSTER_NAME }} --region ${{ env.AWS_REGION }}
+
+      - name: Run integration tests
+        run: |
+          # Get the ALB URL
+          ALB_URL=$(kubectl get ingress -n three-tier-app-qa -o jsonpath='{.items[0].status.loadBalancer.ingress[0].hostname}')
+          
+          # Test API endpoints
+          curl -f "https://${ALB_URL}/api/items" || exit 1
+          curl -f "https://${ALB_URL}/health" || exit 1
+          
+          # Add more integration tests as needed
+          echo "Integration tests passed!"
+
+  # Job 6: Promote to Production
+  promote-prod:
+    needs: [integration-tests]
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main' && github.event.inputs.environment == 'prod'
+    environment:
+      name: production
+      url: https://app.example.com
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Promote images to production
+        run: |
+          # Retag QA images for production
+          docker pull ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}-server:${{ github.sha }}-qa
+          docker tag ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}-server:${{ github.sha }}-qa \
+                      ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}-server:${{ github.sha }}-prod
+          docker push ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}-server:${{ github.sha }}-prod
+          
+          docker pull ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}-client:${{ github.sha }}-qa
+          docker tag ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}-client:${{ github.sha }}-qa \
+                      ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}-client:${{ github.sha }}-prod
+          docker push ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}-client:${{ github.sha }}-prod
+
+      - name: Update kubeconfig
+        run: |
+          aws eks update-kubeconfig --name ${{ env.EKS_CLUSTER_NAME }} --region ${{ env.AWS_REGION }}
+
+      - name: Deploy to Production
+        run: |
+          # Set environment variables for kustomize
+          export ECR_REPOSITORY_URI="${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}"
+          export IMAGE_TAG="${{ github.sha }}-prod"
+          
+          # Apply kustomize overlay
+          kubectl apply -k k8s/prod --namespace=three-tier-app-prod
+          
+          # Wait for rollout
+          kubectl rollout status deployment/server -n three-tier-app-prod --timeout=300s
+          kubectl rollout status deployment/client -n three-tier-app-prod --timeout=300s
+
+      - name: Verify production deployment
+        run: |
+          # Get the ALB URL
+          ALB_URL=$(kubectl get ingress -n three-tier-app-prod -o jsonpath='{.items[0].status.loadBalancer.ingress[0].hostname}')
+          
+          # Health check
+          curl -f "https://${ALB_URL}/health" || exit 1
+          
+          echo "Production deployment successful!"

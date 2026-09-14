@@ -1,0 +1,27 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: server-service
+  namespace: three-tier-app
+  labels:
+    app: server
+spec:
+  type: ClusterIP
+  ports:
+    - port: 5000
+      targetPort: http
+      protocol: TCP
+      name: http
+  selector:
+    app: server
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: three-tier-app
+  namespace: three-tier-app
+  annotations:
+    # IRSA - IAM Roles for Service Accounts
+    # This annotation will be set by Terraform or manually
+    eks.amazonaws.com/role-arn: ""
+automountServiceAccountToken: true

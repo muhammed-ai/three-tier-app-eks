@@ -1,0 +1,25 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - namespace.yaml
+  - configmap.yaml
+  - secrets.yaml
+  - server-deployment.yaml
+  - server-service.yaml
+  - client-deployment.yaml
+  - client-service.yaml
+  - ingress.yaml
+  - hpa.yaml
+
+commonLabels:
+  app.kubernetes.io/name: three-tier-app
+  app.kubernetes.io/managed-by: kustomize
+
+images:
+  - name: server
+    newName: ${ECR_REPOSITORY_URI}
+    newTag: ${IMAGE_TAG}
+  - name: client
+    newName: ${ECR_REPOSITORY_URI}
+    newTag: ${IMAGE_TAG}
